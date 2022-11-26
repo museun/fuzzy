@@ -2,7 +2,7 @@ extern crate std;
 
 use std::f64;
 
-use score::Score;
+use crate::score::Score;
 
 pub const SCORE_MIN: Score = f64::NEG_INFINITY;
 pub const SCORE_MAX: Score = f64::INFINITY;
@@ -22,37 +22,37 @@ pub const CANDIDATE_MAX_CHARS: usize = 1024;
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  fn assert_positive(val: f64) {
-    assert!(val > 0.0);
-  }
+    fn assert_positive(val: f64) {
+        assert!(val > 0.0);
+    }
 
-  fn assert_negative(val: f64) {
-    assert!(val < 0.0);
-  }
+    fn assert_negative(val: f64) {
+        assert!(val < 0.0);
+    }
 
-  #[test]
-  fn positive_scores() {
-    assert_positive(SCORE_MAX);
-    assert_positive(SCORE_MATCH_CONSECUTIVE);
-    assert_positive(SCORE_MATCH_SLASH);
-    assert_positive(SCORE_MATCH_WORD);
-    assert_positive(SCORE_MATCH_CAPITAL);
-    assert_positive(SCORE_MATCH_DOT);
-  }
+    #[test]
+    fn positive_scores() {
+        assert_positive(SCORE_MAX);
+        assert_positive(SCORE_MATCH_CONSECUTIVE);
+        assert_positive(SCORE_MATCH_SLASH);
+        assert_positive(SCORE_MATCH_WORD);
+        assert_positive(SCORE_MATCH_CAPITAL);
+        assert_positive(SCORE_MATCH_DOT);
+    }
 
-  #[test]
-  fn negative_scores() {
-    assert_negative(SCORE_MIN);
-    assert_negative(SCORE_GAP_LEADING);
-    assert_negative(SCORE_GAP_INNER);
-    assert_negative(SCORE_GAP_TRAILING);
-  }
+    #[test]
+    fn negative_scores() {
+        assert_negative(SCORE_MIN);
+        assert_negative(SCORE_GAP_LEADING);
+        assert_negative(SCORE_GAP_INNER);
+        assert_negative(SCORE_GAP_TRAILING);
+    }
 
-  #[test]
-  fn non_zero() {
-    assert_ne!(0, CANDIDATE_MAX_BYTES);
-    assert_ne!(0, CANDIDATE_MAX_CHARS);
-  }
+    #[test]
+    fn non_zero() {
+        assert_ne!(0, CANDIDATE_MAX_BYTES);
+        assert_ne!(0, CANDIDATE_MAX_CHARS);
+    }
 }

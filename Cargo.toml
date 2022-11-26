@@ -1,42 +1,12 @@
 [package]
-name = "fzyr"
-version = "0.2.0"
-homepage = "https://github.com/jmaargh/fzyr"
-authors = ["jmaargh <https://github.com/jmaargh>"]
-
-description = "A fuzzy(er) finder 🔎"
-repository = "https://github.com/jmaargh/fzyr"
-# TODO:
-# documentation = ""
-
-readme = "README.md"
-categories = ["algorithms", "command-line-utilities"]
-keywords = ["fuzzy", "finder", "find", "search"]
+name         = "fzyr"
+version      = "0.3.0"
+authors      = ["jmaargh <https://github.com/jmaargh>"]
+categories   = ["algorithms", "command-line-utilities"]
+keywords     = ["fuzzy", "finder", "find", "search"]
 license-file = "LICENSE"
-
-autobins = false
-
-
-[lib]
-name = "fzyr"
-
-
-[[bin]]
-name = "fzyr"
-path = "src/bin/main.rs"
-doc = false
-
+edition      = "2021"
 
 [dependencies]
-ndarray = "^0.11.2"
-itertools = "^0.7.8"
-crossbeam = "^0.4.1"
-bit-vec = "^0.5.0"
-clap = "^2.32.0"
-console = "^0.6.1"
-
-
-[profile.release]
-opt-level = 3
-debug = false
-lto = true
+ndarray   = "0.15.6"
+bit-vec   = "0.6.3"
