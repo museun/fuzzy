@@ -91,8 +91,8 @@ impl PartialEq for LocateResult {
 ///
 /// A "match" must contain all of the letters of `query` in order, but not
 /// necessarily continguously.
-pub fn has_match(query: &str, candidate: impl AsRef<str>) -> bool {
-    let mut cand_iter = candidate.as_ref().chars();
+pub fn has_match(query: &str, candidate: impl crate::search::SearchItem) -> bool {
+    let mut cand_iter = candidate.as_str().chars();
     // Note: `cand_iter` will be advanced during `all`, which is short-circuiting
     query
         .chars()

@@ -8,16 +8,38 @@ pub type ScoreResults = Vec<ScoreResult>;
 /// Collection of scores, locations, and the candidates they apply to
 pub type LocateResults = Vec<LocateResult>;
 
+pub trait SearchItem: Sized {
+    fn as_str(&self) -> &str;
+}
+
+impl<'a> SearchItem for &'a str {
+    fn as_str(&self) -> &str {
+        self
+    }
+}
+
+impl SearchItem for String {
+    fn as_str(&self) -> &str {
+        self
+    }
+}
+
+impl<'a, S: SearchItem> SearchItem for &'a S {
+    fn as_str(&self) -> &str {
+        <_ as SearchItem>::as_str(*self)
+    }
+}
+
 /// Search among a collection of candidates using the given query, returning
 /// an ordered collection of results (highest score first)
-pub fn search_score<T: AsRef<str>>(query: &str, candidates: &[T]) -> ScoreResults {
+pub fn search_score<T: SearchItem>(query: &str, candidates: &[T]) -> ScoreResults {
     search_internal(query, candidates, score_inner)
 }
 
 /// Search among a collection of candidates using the given query, returning
 /// an ordered collection of results (highest score first) with the locations
 /// of the query in each candidate
-pub fn search_locate<T: AsRef<str>>(query: &str, candidates: &[T]) -> LocateResults {
+pub fn search_locate<T: SearchItem>(query: &str, candidates: &[T]) -> LocateResults {
     search_internal(query, candidates, locate_inner)
 }
 
@@ -28,14 +50,14 @@ fn search_internal<T, S>(
 ) -> Vec<T>
 where
     T: PartialOrd + Sized + Send + 'static,
-    S: AsRef<str>,
+    S: SearchItem,
 {
     let mut out = candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| has_match(&query, c))
+        .filter(|(_, c)| has_match(query, c))
         .fold(Vec::with_capacity(candidates.len()), |mut a, (i, c)| {
-            a.push(search_fn(&query, c.as_ref(), 0 + i));
+            a.push(search_fn(query, c.as_str(), i));
             a
         });
 
