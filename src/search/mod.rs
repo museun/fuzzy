@@ -8,11 +8,11 @@ pub type ScoreResults = Vec<ScoreResult>;
 /// Collection of scores, locations, and the candidates they apply to
 pub type LocateResults = Vec<LocateResult>;
 
-pub trait SearchItem: Sized {
+pub trait SearchItem {
     fn as_str(&self) -> &str;
 }
 
-impl<'a> SearchItem for &'a str {
+impl SearchItem for str {
     fn as_str(&self) -> &str {
         self
     }
