@@ -10,14 +10,14 @@ pub type LocateResults = Vec<LocateResult>;
 
 /// Search among a collection of candidates using the given query, returning
 /// an ordered collection of results (highest score first)
-pub fn search_score(query: &str, candidates: &[&str]) -> ScoreResults {
+pub fn search_score<T: AsRef<str>>(query: &str, candidates: &[T]) -> ScoreResults {
     search_internal(query, candidates, score_inner)
 }
 
 /// Search among a collection of candidates using the given query, returning
 /// an ordered collection of results (highest score first) with the locations
 /// of the query in each candidate
-pub fn search_locate(query: &str, candidates: &[&str]) -> LocateResults {
+pub fn search_locate<T: AsRef<str>>(query: &str, candidates: &[T]) -> LocateResults {
     search_internal(query, candidates, locate_inner)
 }
 
