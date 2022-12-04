@@ -1,45 +1,26 @@
-pub mod config;
-
+use crate::Params;
 use std::cmp::Ordering;
 
-use bit_vec::BitVec;
-use ndarray::prelude::*;
-
-use crate::config::*;
-
-pub type Score = f64;
-type ScoreMatrix = Array2<Score>;
+type ScoreMatrix = ndarray::Array2<f32>;
 
 /// Result of querying the score against a candidate
-#[derive(Debug)]
-pub struct ScoreResult {
-    pub candidate_index: usize,
-    pub score: Score,
+#[derive(Copy, Clone, Debug)]
+pub struct Score {
+    pub index: usize,
+    pub score: f32,
 }
 
-/// Result of querying the score and location against a candidate
-#[derive(Debug)]
-pub struct LocateResult {
-    pub candidate_index: usize,
-    pub score: Score,
-    /// Binary mask showing where the charcaters of the query match the candidate
-    pub match_mask: BitVec,
-}
-
-impl ScoreResult {
-    pub fn new(candidate_index: usize) -> Self {
-        Self::with_score(candidate_index, SCORE_MIN)
+impl Score {
+    pub const fn new(index: usize) -> Self {
+        Self::with_score(index, Params::SCORE_MIN)
     }
 
-    pub fn with_score(candidate_index: usize, score: Score) -> Self {
-        Self {
-            candidate_index,
-            score,
-        }
+    pub const fn with_score(index: usize, score: f32) -> Self {
+        Self { index, score }
     }
 }
 
-impl PartialOrd for ScoreResult {
+impl PartialOrd for Score {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(
             self.score
@@ -50,207 +31,113 @@ impl PartialOrd for ScoreResult {
     }
 }
 
-impl PartialEq for ScoreResult {
+impl PartialEq for Score {
     fn eq(&self, other: &Self) -> bool {
         self.score == other.score
     }
 }
 
-impl LocateResult {
-    pub fn new(candidate_index: usize, candidate_size: usize) -> Self {
-        Self::with_score(candidate_index, candidate_size, SCORE_MIN)
-    }
+impl Eq for Score {}
 
-    pub fn with_score(candidate_index: usize, candidate_size: usize, score: Score) -> Self {
-        Self {
-            candidate_index,
-            score,
-            match_mask: BitVec::from_elem(candidate_size, false),
-        }
-    }
-}
-
-impl PartialOrd for LocateResult {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(
-            self.score
-                .partial_cmp(&other.score)
-                .unwrap_or(Ordering::Less)
-                .reverse(),
-        )
-    }
-}
-
-impl PartialEq for LocateResult {
-    fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
-    }
-}
-
-/// Returns `true` if and only if `candidate` is a match for `query`
-///
-/// A "match" must contain all of the letters of `query` in order, but not
-/// necessarily continguously.
-pub fn has_match(query: &str, candidate: &(impl crate::search::SearchItem + ?Sized)) -> bool {
-    let mut cand_iter = candidate.as_str().chars();
-    // Note: `cand_iter` will be advanced during `all`, which is short-circuiting
+#[allow(dead_code)]
+pub fn has_match(query: &str, candidate: &(impl crate::SearchItem + ?Sized)) -> bool {
+    let mut chars = candidate.as_str().chars();
     query
         .chars()
-        .all(|c| cand_iter.any(|c2| c2.to_lowercase().eq(c.to_lowercase())))
+        .all(|right| chars.any(|left| left.to_lowercase().eq(right.to_lowercase())))
 }
 
-/// Calculates a score for how well a `query` matches a `candidate`
-///
-/// Higher scores are better
-pub fn score(query: &str, candidate: &str) -> ScoreResult {
-    score_inner(query, candidate, 0)
-}
-
-pub(crate) fn score_inner(query: &str, candidate: &str, index: usize) -> ScoreResult {
-    let (q_len, c_len) = match get_lengths(query, candidate) {
-        LengthsOrScore::Score(s) => return ScoreResult::with_score(index, s),
-        LengthsOrScore::Lengths(q, c) => (q, c),
+pub fn score(query: &str, candidate: &str, index: usize) -> Score {
+    let (q_len, c_len) = match Metric::classify(query, candidate) {
+        Metric::Score(s) => return Score::with_score(index, s),
+        Metric::Lengths(q, c) => (q, c),
     };
 
-    let (best_score_overall, _) = score_internal(query, candidate, q_len, c_len);
-    ScoreResult::with_score(index, best_score_overall[[q_len - 1, c_len - 1]])
-}
+    let (best_score_overall, _) = {
+        let match_bonuses = candidate_match_bonuses(candidate);
 
-/// Calculates a score for how well a `query` matches a `candidate` and gives
-/// the locations of the `query` characters in the `candidate` too
-///
-/// Higher scores are better
-pub fn locate(query: &str, candidate: &str) -> LocateResult {
-    locate_inner(query, candidate, 0)
-}
+        // Matrix of the best score for each position ending in a match
+        let mut best_score_w_ending = ScoreMatrix::zeros((q_len, c_len));
+        // Matrix for the best score for each position.
+        let mut best_score_overall = ScoreMatrix::zeros((q_len, c_len));
 
-pub(crate) fn locate_inner(query: &str, candidate: &str, index: usize) -> LocateResult {
-    let candidate_chars = candidate.chars().count();
-    let (q_len, c_len) = match get_lengths(query, candidate) {
-        LengthsOrScore::Score(s) => {
-            let mut out = LocateResult::with_score(index, candidate_chars, s);
-            if s == SCORE_MAX {
-                // This was an exact match
-                out.match_mask.set_all();
-            }
-            return out;
-        }
-        LengthsOrScore::Lengths(q, c) => (q, c),
-    };
-
-    let (best_score_overall, best_score_w_ending) = score_internal(query, candidate, q_len, c_len);
-    let mut out = LocateResult::with_score(
-        index,
-        candidate_chars,
-        best_score_overall[[q_len - 1, c_len - 1]],
-    );
-
-    let mut query_iter = query.chars();
-    let mut cand_iter = candidate.chars();
-    // Safe because we'll return at the beginning for zero or unit length
-    let mut i = q_len;
-    let mut j = c_len;
-    while query_iter.next_back().is_some() {
-        i = i.wrapping_sub(1);
-        while cand_iter.next_back().is_some() {
-            j = j.wrapping_sub(1);
-            if best_score_w_ending[[i, j]] != SCORE_MIN
-                && best_score_w_ending[[i, j]] == best_score_overall[[i, j]]
-            {
-                // There's a match here that was on an optimal path
-                out.match_mask.set(j, true);
-                break; // Go to the next query letter
-            }
-        }
-    }
-
-    out
-}
-
-enum LengthsOrScore {
-    Lengths(usize, usize),
-    Score(self::Score),
-}
-
-fn get_lengths(query: &str, candidate: &str) -> LengthsOrScore {
-    if candidate.len() > CANDIDATE_MAX_BYTES || query.is_empty() {
-        // Candidate too long or query too short
-        return LengthsOrScore::Score(SCORE_MIN);
-    }
-
-    let q_len = query.chars().count();
-    let c_len = candidate.chars().count();
-
-    if q_len == c_len {
-        // This is only called when there _is_ a match (candidate contains all
-        // chars of query in the right order, so equal lengths mean equal
-        // strings
-        return LengthsOrScore::Score(SCORE_MAX);
-    }
-
-    if c_len > CANDIDATE_MAX_CHARS {
-        // Too many characters
-        return LengthsOrScore::Score(SCORE_MIN);
-    }
-
-    LengthsOrScore::Lengths(q_len, c_len)
-}
-
-fn score_internal(
-    query: &str,
-    candidate: &str,
-    q_len: usize,
-    c_len: usize,
-) -> (ScoreMatrix, ScoreMatrix) {
-    let match_bonuses = candidate_match_bonuses(candidate);
-
-    // Matrix of the best score for each position ending in a match
-    let mut best_score_w_ending = ScoreMatrix::zeros((q_len, c_len));
-    // Matrix for the best score for each position.
-    let mut best_score_overall = ScoreMatrix::zeros((q_len, c_len));
-
-    for (i, q_char) in query.chars().enumerate() {
-        let mut prev_score = SCORE_MIN;
-        let gap_score = if i == q_len - 1 {
-            SCORE_GAP_TRAILING
-        } else {
-            SCORE_GAP_INNER
-        };
-
-        for (j, c_char) in candidate.chars().enumerate() {
-            if q_char.to_lowercase().eq(c_char.to_lowercase()) {
-                // Get the score bonus for matching this char
-                let score = if i == 0 {
-                    // Beginning of the query, penalty for leading gap
-                    (j as f64 * SCORE_GAP_LEADING) + match_bonuses[j]
-                } else if j != 0 {
-                    // Middle of both query and candidate
-                    // Either give it the match bonus, or use the consecutive
-                    // match (which wil always be higher, but doesn't stack
-                    // with match bonus)
-                    (best_score_overall[[i - 1, j - 1]] + match_bonuses[j])
-                        .max(best_score_w_ending[[i - 1, j - 1]] + SCORE_MATCH_CONSECUTIVE)
-                } else {
-                    SCORE_MIN
-                };
-
-                prev_score = score.max(prev_score + gap_score);
-                best_score_overall[[i, j]] = prev_score;
-                best_score_w_ending[[i, j]] = score;
+        for (i, q_char) in query.chars().enumerate() {
+            let mut prev_score = Params::SCORE_MIN;
+            let gap_score = if i == q_len - 1 {
+                Params::SCORE_GAP_TRAILING
             } else {
-                // Give the score penalty for the gap
-                prev_score += gap_score;
-                best_score_overall[[i, j]] = prev_score;
-                // We don't end in a match
-                best_score_w_ending[[i, j]] = SCORE_MIN;
+                Params::SCORE_GAP_INNER
+            };
+
+            for (j, c_char) in candidate.chars().enumerate() {
+                if q_char.to_lowercase().eq(c_char.to_lowercase()) {
+                    // Get the score bonus for matching this char
+                    let score = if i == 0 {
+                        // Beginning of the query, penalty for leading gap
+                        (j as f32).mul_add(Params::SCORE_GAP_LEADING, match_bonuses[j])
+                    } else if j != 0 {
+                        // Middle of both query and candidate
+                        // Either give it the match bonus, or use the consecutive
+                        // match (which wil always be higher, but doesn't stack
+                        // with match bonus)
+                        (best_score_overall[[i - 1, j - 1]] + match_bonuses[j]).max(
+                            best_score_w_ending[[i - 1, j - 1]] + Params::SCORE_MATCH_CONSECUTIVE,
+                        )
+                    } else {
+                        Params::SCORE_MIN
+                    };
+
+                    prev_score = score.max(prev_score + gap_score);
+                    best_score_overall[[i, j]] = prev_score;
+                    best_score_w_ending[[i, j]] = score;
+                } else {
+                    // Give the score penalty for the gap
+                    prev_score += gap_score;
+                    best_score_overall[[i, j]] = prev_score;
+                    // We don't end in a match
+                    best_score_w_ending[[i, j]] = Params::SCORE_MIN;
+                }
             }
         }
-    }
 
-    (best_score_overall, best_score_w_ending)
+        (best_score_overall, best_score_w_ending)
+    };
+
+    Score::with_score(index, best_score_overall[[q_len - 1, c_len - 1]])
 }
 
-fn candidate_match_bonuses(candidate: &str) -> Vec<Score> {
+enum Metric {
+    Lengths(usize, usize),
+    Score(f32),
+}
+
+impl Metric {
+    fn classify(query: &str, candidate: &str) -> Self {
+        if candidate.len() > Params::CANDIDATE_MAX_BYTES || query.is_empty() {
+            // Candidate too long or query too short
+            return Self::Score(Params::SCORE_MIN);
+        }
+
+        let q_len = query.chars().count();
+        let c_len = candidate.chars().count();
+
+        if q_len == c_len {
+            // This is only called when there _is_ a match (candidate contains all
+            // chars of query in the right order, so equal lengths mean equal
+            // strings
+            return Self::Score(Params::SCORE_MAX);
+        }
+
+        if c_len > Params::CANDIDATE_MAX_CHARS {
+            // Too many characters
+            return Self::Score(Params::SCORE_MIN);
+        }
+
+        Self::Lengths(q_len, c_len)
+    }
+}
+
+fn candidate_match_bonuses(candidate: &str) -> Vec<f32> {
     let mut prev_char = '/';
     candidate
         .chars()
@@ -262,16 +149,16 @@ fn candidate_match_bonuses(candidate: &str) -> Vec<Score> {
         .collect()
 }
 
-fn character_match_bonus(current: char, previous: char) -> Score {
+fn character_match_bonus(current: char, previous: char) -> f32 {
     if current.is_uppercase() && previous.is_lowercase() {
-        SCORE_MATCH_CAPITAL
-    } else {
-        match previous {
-            '/' => SCORE_MATCH_SLASH,
-            '.' => SCORE_MATCH_DOT,
-            _ if is_separator(previous) => SCORE_MATCH_WORD,
-            _ => 0.0,
-        }
+        return Params::SCORE_MATCH_CAPITAL;
+    }
+
+    match previous {
+        '/' => Params::SCORE_MATCH_SLASH,
+        '.' => Params::SCORE_MATCH_DOT,
+        _ if is_separator(previous) => Params::SCORE_MATCH_WORD,
+        _ => 0.0,
     }
 }
 
@@ -282,6 +169,10 @@ const fn is_separator(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn score(query: &str, candidate: &str) -> Score {
+        super::score(query, candidate, 0)
+    }
 
     #[test]
     fn exact_match() {
@@ -369,13 +260,13 @@ mod tests {
 
     #[test]
     fn score_exact() {
-        assert_eq!(SCORE_MAX, score("query", "query").score);
+        assert_eq!(Params::SCORE_MAX, score("query", "query").score);
         assert_eq!(
-            SCORE_MAX,
+            Params::SCORE_MAX,
             score("156aufsdn926f9=sdk/~']", "156aufsdn926f9=sdk/~']").score
         );
         assert_eq!(
-            SCORE_MAX,
+            Params::SCORE_MAX,
             score(
                 "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫",
                 "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫"
@@ -386,40 +277,48 @@ mod tests {
 
     #[test]
     fn score_empty() {
-        assert_eq!(SCORE_MIN, score("", "").score);
-        assert_eq!(SCORE_MIN, score("", "candidate").score);
-        assert_eq!(SCORE_MIN, score("", "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫").score);
-        assert_eq!(SCORE_MIN, score("", "прописная БУКВА").score);
-        assert_eq!(SCORE_MIN, score("", "a").score);
-        assert_eq!(SCORE_MIN, score("", "4561").score);
+        assert_eq!(Params::SCORE_MIN, score("", "").score);
+        assert_eq!(Params::SCORE_MIN, score("", "candidate").score);
+        assert_eq!(
+            Params::SCORE_MIN,
+            score("", "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫").score
+        );
+        assert_eq!(Params::SCORE_MIN, score("", "прописная БУКВА").score);
+        assert_eq!(Params::SCORE_MIN, score("", "a").score);
+        assert_eq!(Params::SCORE_MIN, score("", "4561").score);
     }
 
     #[test]
     fn score_gaps() {
-        assert_eq!(SCORE_GAP_LEADING, score("a", "*a").score);
-        assert_eq!(SCORE_GAP_LEADING * 2.0, score("a", "*ba").score);
+        assert_eq!(Params::SCORE_GAP_LEADING, score("a", "*a").score);
+        assert_eq!(Params::SCORE_GAP_LEADING * 2.0, score("a", "*ba").score);
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_GAP_TRAILING,
+            Params::SCORE_GAP_LEADING * 2.0 + Params::SCORE_GAP_TRAILING,
             score("a", "**a*").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_GAP_TRAILING * 2.0,
+            Params::SCORE_GAP_LEADING * 2.0 + Params::SCORE_GAP_TRAILING * 2.0,
             score("a", "**a**").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CONSECUTIVE + SCORE_GAP_TRAILING * 2.0,
+            Params::SCORE_GAP_LEADING * 2.0
+                + Params::SCORE_MATCH_CONSECUTIVE
+                + Params::SCORE_GAP_TRAILING * 2.0,
             score("aa", "**aa♺*").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_GAP_INNER + SCORE_MATCH_WORD + SCORE_GAP_TRAILING * 2.0,
+            Params::SCORE_GAP_LEADING * 2.0
+                + Params::SCORE_GAP_INNER
+                + Params::SCORE_MATCH_WORD
+                + Params::SCORE_GAP_TRAILING * 2.0,
             score("ab", "**a-b♺*").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING
-                + SCORE_GAP_LEADING
-                + SCORE_GAP_INNER
-                + SCORE_GAP_TRAILING
-                + SCORE_GAP_TRAILING,
+            Params::SCORE_GAP_LEADING
+                + Params::SCORE_GAP_LEADING
+                + Params::SCORE_GAP_INNER
+                + Params::SCORE_GAP_TRAILING
+                + Params::SCORE_GAP_TRAILING,
             score("aa", "**a♺a**").score
         );
     }
@@ -427,15 +326,15 @@ mod tests {
     #[test]
     fn score_consecutive() {
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_MATCH_CONSECUTIVE,
+            Params::SCORE_GAP_LEADING + Params::SCORE_MATCH_CONSECUTIVE,
             score("aa", "*aa").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_MATCH_CONSECUTIVE * 2.0,
+            Params::SCORE_GAP_LEADING + Params::SCORE_MATCH_CONSECUTIVE * 2.0,
             score("aaa", "♫aaa").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_GAP_INNER + SCORE_MATCH_CONSECUTIVE,
+            Params::SCORE_GAP_LEADING + Params::SCORE_GAP_INNER + Params::SCORE_MATCH_CONSECUTIVE,
             score("aaa", "*a*aa").score
         );
     }
@@ -443,15 +342,17 @@ mod tests {
     #[test]
     fn score_slash() {
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_MATCH_SLASH,
+            Params::SCORE_GAP_LEADING + Params::SCORE_MATCH_SLASH,
             score("a", "/a").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_SLASH,
+            Params::SCORE_GAP_LEADING * 2.0 + Params::SCORE_MATCH_SLASH,
             score("a", "*/a").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_SLASH + SCORE_MATCH_CONSECUTIVE,
+            Params::SCORE_GAP_LEADING * 2.0
+                + Params::SCORE_MATCH_SLASH
+                + Params::SCORE_MATCH_CONSECUTIVE,
             score("aa", "a/aa").score
         );
     }
@@ -459,139 +360,34 @@ mod tests {
     #[test]
     fn score_capital() {
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_MATCH_CAPITAL,
+            Params::SCORE_GAP_LEADING + Params::SCORE_MATCH_CAPITAL,
             score("a", "bA").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CAPITAL,
+            Params::SCORE_GAP_LEADING * 2.0 + Params::SCORE_MATCH_CAPITAL,
             score("a", "baA").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CAPITAL + SCORE_MATCH_CONSECUTIVE,
+            Params::SCORE_GAP_LEADING * 2.0
+                + Params::SCORE_MATCH_CAPITAL
+                + Params::SCORE_MATCH_CONSECUTIVE,
             score("aa", "😞aAa").score
         );
     }
 
     #[test]
     fn score_dot() {
-        assert_eq!(SCORE_GAP_LEADING + SCORE_MATCH_DOT, score("a", ".a").score);
         assert_eq!(
-            SCORE_GAP_LEADING * 3.0 + SCORE_MATCH_DOT,
+            Params::SCORE_GAP_LEADING + Params::SCORE_MATCH_DOT,
+            score("a", ".a").score
+        );
+        assert_eq!(
+            Params::SCORE_GAP_LEADING * 3.0 + Params::SCORE_MATCH_DOT,
             score("a", "*a.a").score
         );
         assert_eq!(
-            SCORE_GAP_LEADING + SCORE_GAP_INNER + SCORE_MATCH_DOT,
+            Params::SCORE_GAP_LEADING + Params::SCORE_GAP_INNER + Params::SCORE_MATCH_DOT,
             score("a", "♫a.a").score
-        );
-    }
-
-    fn assert_locate_score(query: &str, candidate: &str, score: Score) {
-        let result = locate(query, candidate);
-
-        assert_eq!(score, result.score);
-    }
-
-    #[test]
-    fn locate_exact() {
-        assert_locate_score("query", "query", SCORE_MAX);
-        assert_locate_score(
-            "156aufsdn926f9=sdk/~']",
-            "156aufsdn926f9=sdk/~']",
-            SCORE_MAX,
-        );
-        assert_locate_score(
-            "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫",
-            "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫",
-            SCORE_MAX,
-        );
-    }
-
-    #[test]
-    fn locate_empty() {
-        assert_locate_score("", "", SCORE_MIN);
-        assert_locate_score("", "candidate", SCORE_MIN);
-        assert_locate_score("", "😨Ɣ·®x¯ÍĞ.ɅƁñîƹ♺àwÑ☆ǈ😞´ƙºÑ♫, ", SCORE_MIN);
-        assert_locate_score("", "прописная БУКВА", SCORE_MIN);
-        assert_locate_score("", "a", SCORE_MIN);
-        assert_locate_score("", "4561", SCORE_MIN);
-    }
-
-    #[test]
-    fn locate_gaps() {
-        assert_locate_score("a", "*a", SCORE_GAP_LEADING);
-        assert_locate_score("a", "*ba", SCORE_GAP_LEADING * 2.0);
-        assert_locate_score("a", "**a*", SCORE_GAP_LEADING * 2.0 + SCORE_GAP_TRAILING);
-        assert_locate_score(
-            "a",
-            "**a**",
-            SCORE_GAP_LEADING * 2.0 + SCORE_GAP_TRAILING * 2.0,
-        );
-        assert_locate_score(
-            "aa",
-            "**aa♺*",
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CONSECUTIVE + SCORE_GAP_TRAILING * 2.0,
-        );
-        assert_locate_score(
-            "ab",
-            "**a-b♺*",
-            SCORE_GAP_LEADING * 2.0 + SCORE_GAP_INNER + SCORE_MATCH_WORD + SCORE_GAP_TRAILING * 2.0,
-        );
-        assert_locate_score(
-            "aa",
-            "**a♺a**",
-            SCORE_GAP_LEADING
-                + SCORE_GAP_LEADING
-                + SCORE_GAP_INNER
-                + SCORE_GAP_TRAILING
-                + SCORE_GAP_TRAILING,
-        );
-    }
-
-    #[test]
-    fn locate_consecutive() {
-        assert_locate_score("aa", "*aa", SCORE_GAP_LEADING + SCORE_MATCH_CONSECUTIVE);
-        assert_locate_score(
-            "aaa",
-            "♫aaa",
-            SCORE_GAP_LEADING + SCORE_MATCH_CONSECUTIVE * 2.0,
-        );
-        assert_locate_score(
-            "aaa",
-            "*a*aa",
-            SCORE_GAP_LEADING + SCORE_GAP_INNER + SCORE_MATCH_CONSECUTIVE,
-        );
-    }
-
-    #[test]
-    fn locate_slash() {
-        assert_locate_score("a", "/a", SCORE_GAP_LEADING + SCORE_MATCH_SLASH);
-        assert_locate_score("a", "*/a", SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_SLASH);
-        assert_locate_score(
-            "aa",
-            "a/aa",
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_SLASH + SCORE_MATCH_CONSECUTIVE,
-        );
-    }
-
-    #[test]
-    fn locate_capital() {
-        assert_locate_score("a", "bA", SCORE_GAP_LEADING + SCORE_MATCH_CAPITAL);
-        assert_locate_score("a", "baA", SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CAPITAL);
-        assert_locate_score(
-            "aa",
-            "😞aAa",
-            SCORE_GAP_LEADING * 2.0 + SCORE_MATCH_CAPITAL + SCORE_MATCH_CONSECUTIVE,
-        );
-    }
-
-    #[test]
-    fn locate_dot() {
-        assert_locate_score("a", ".a", SCORE_GAP_LEADING + SCORE_MATCH_DOT);
-        assert_locate_score("a", "*a.a", SCORE_GAP_LEADING * 3.0 + SCORE_MATCH_DOT);
-        assert_locate_score(
-            "a",
-            "♫a.a",
-            SCORE_GAP_LEADING + SCORE_GAP_INNER + SCORE_MATCH_DOT,
         );
     }
 }
