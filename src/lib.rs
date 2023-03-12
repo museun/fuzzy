@@ -72,7 +72,10 @@ impl<'a> SearchItem for std::borrow::Cow<'a, str> {
     }
 }
 
-impl<'a, S: SearchItem> SearchItem for &'a S {
+impl<'a, S: SearchItem> SearchItem for &'a S
+where
+    S: ?Sized,
+{
     fn as_str(&self) -> &str {
         <_ as SearchItem>::as_str(*self)
     }
