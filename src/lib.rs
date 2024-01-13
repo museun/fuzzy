@@ -54,6 +54,12 @@ pub trait SearchItem {
     fn as_str(&self) -> &str;
 }
 
+impl SearchItem for () {
+    fn as_str(&self) -> &str {
+        ""
+    }
+}
+
 impl SearchItem for str {
     fn as_str(&self) -> &str {
         self
